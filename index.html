@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Walmart Sales Charts</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <main>
+        <header class="dashboard-header">
+            <h1>Walmart Sales Dashboard</h1>
+            <p>Total weekly sales across Walmart stores with store, holiday, and fuel price insights.</p>
+        </header>
+
+        <section class="filters" aria-label="Dashboard filters">
+            <label for="store-filter">
+                Store
+                <select id="store-filter">
+                    <option value="all">All Stores</option>
+                </select>
+            </label>
+
+            <label for="holiday-filter">
+                Week Type
+                <select id="holiday-filter">
+                    <option value="all">All Weeks</option>
+                    <option value="1">Holiday Week</option>
+                    <option value="0">Non-Holiday Week</option>
+                </select>
+            </label>
+
+            <button id="reset-filters" type="button">Reset</button>
+            <span id="filter-summary" class="filter-summary"></span>
+        </section>
+
+        <div class="chart-grid">
+            <article class="chart-panel">
+                <h2>Weekly Sales Trend</h2>
+                <p>Total weekly sales across all Walmart stores.</p>
+                <section id="chart" aria-label="Line chart showing weekly sales over time"></section>
+            </article>
+
+            <article class="chart-panel">
+                <h2>Total Sales by Store</h2>
+                <p>Total weekly sales grouped by Walmart store. The top-performing store is highlighted.</p>
+                <section id="store-chart" aria-label="Horizontal bar chart showing total sales by store"></section>
+            </article>
+
+            <article class="chart-panel">
+                <h2>Holiday vs Non-Holiday Sales</h2>
+                <p>Total sales percentage comparison between holiday and non-holiday weeks.</p>
+                <section id="holiday-chart" aria-label="Donut chart comparing total sales during holiday and non-holiday weeks"></section>
+            </article>
+
+            <article class="chart-panel">
+                <h2>Fuel Price vs Weekly Sales</h2>
+                <p>Relationship between fuel price and weekly sales, colored by holiday status.</p>
+                <section id="scatter-chart" aria-label="Scatter plot showing fuel price versus weekly sales"></section>
+            </article>
+        </div>
+    </main>
+
+    <div id="tooltip" class="tooltip" aria-hidden="true"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+    <script src="sales-data.js"></script>
+    <script>
+        const margin = { top: 30, right: 40, bottom: 60, left: 90 };
+        const width = 960 - margin.left - margin.right;
+        const height = 520 - margin.top - margin.bottom;
+
+        const parseDate = d3.timeParse("%d-%m-%Y");
+        const formatDate = d3.timeFormat("%d %b %Y");
+        const formatSales = d3.format("$,.2f");
+        const formatBillionSales = d => `$${(d / 1_000_000_000).toFixed(1)} billion`;
+        const formatMillionSales = d => `$${(d / 1_000_000).toFixed(1)} million`;
+        const formatPercent = d3.format(".1%");
+
+        const tooltip = d3.select("#tooltip");
+        const storeFilter = document.querySelector("#store-filter");
+        const holidayFilter = document.querySelector("#holiday-filter");
+        const resetFiltersButton = document.querySelector("#reset-filters");
+        const filterSummary = document.querySelector("#filter-summary");
+
+        function getWeekType(d) {
+            return d.Holiday_Flag === "1" || d.Holiday_Flag === 1 ? "Holiday Week" : "Non-Holiday Week";
+        }
+
+        function setupFilters(rawData) {
+            const stores = Array.from(new Set(rawData.map(d => d.Store)))
+                .filter(Boolean)
+                .sort((a, b) => d3.ascending(+a, +b));
+
+            storeFilter.innerHTML = '<option value="all">All Stores</option>';
+            stores.forEach(store => {
+                const option = document.createElement("option");
+                option.value = store;
+                option.textContent = `Store ${store}`;
+                storeFilter.appendChild(option);
+            });
+
+            storeFilter.addEventListener("change", () => updateDashboard(rawData));
+            holidayFilter.addEventListener("change", () => updateDashboard(rawData));
+            resetFiltersButton.addEventListener("click", () => {
+                storeFilter.value = "all";
+                holidayFilter.value = "all";
+                updateDashboard(rawData);
+            });
+        }
+
+        function getFilteredData(rawData) {
+            const selectedStore = storeFilter.value;
+            const selectedHoliday = holidayFilter.value;
+
+            return rawData.filter(d => {
+                const matchesStore = selectedStore === "all" || d.Store === selectedStore;
+                const matchesHoliday = selectedHoliday === "all" || d.Holiday_Flag === selectedHoliday;
+                return matchesStore && matchesHoliday;
+            });
+        }
+
+        function updateDashboard(rawData) {
+            const filteredData = getFilteredData(rawData);
+            filterSummary.textContent = `${filteredData.length.toLocaleString()} records shown`;
+
+            drawChart(filteredData);
+            drawStoreSalesChart(filteredData);
+            drawHolidaySalesChart(filteredData);
+            drawFuelSalesScatterPlot(filteredData);
+        }
+
+        function drawChart(rawData) {
+            d3.select("#chart").selectAll("*").remove();
+
+            const svg = d3.select("#chart")
+                .append("svg")
+                .attr("viewBox", `0 0 ${width + margin.left + margin.right} ${height + margin.top + margin.bottom}`)
+                .attr("role", "img")
+                .attr("aria-labelledby", "chart-title chart-desc");
+
+            svg.append("title")
+                .attr("id", "chart-title")
+                .text("Weekly sales trend line chart");
+
+            svg.append("desc")
+                .attr("id", "chart-desc")
+                .text("A D3 line chart with Date on the x-axis and total Weekly Sales on the y-axis.");
+
+            const chart = svg.append("g")
+                .attr("transform", `translate(${margin.left},${margin.top})`);
+
+            rawData.forEach(d => {
+                d.date = parseDate(d.Date);
+                d.sales = +d.Weekly_Sales;
+            });
+
+            const data = Array.from(
+                d3.rollup(
+                    rawData.filter(d => d.date && !Number.isNaN(d.sales)),
+                    values => d3.sum(values, d => d.sales),
+                    d => +d.date
+                ),
+                ([date, sales]) => ({ date: new Date(+date), sales })
+            ).sort((a, b) => d3.ascending(a.date, b.date));
+
+            const x = d3.scaleTime()
+                .domain(d3.extent(data, d => d.date))
+                .range([0, width]);
+
+            const y = d3.scaleLinear()
+                .domain([0, d3.max(data, d => d.sales)])
+                .nice()
+                .range([height, 0]);
+
+            const xAxis = d3.axisBottom(x)
+                .ticks(d3.timeMonth.every(3))
+                .tickFormat(d3.timeFormat("%b %Y"));
+
+            const yAxis = d3.axisLeft(y)
+                .ticks(8)
+                .tickFormat(formatMillionSales);
+
+            chart.append("g")
+                .attr("class", "axis")
+                .attr("transform", `translate(0,${height})`)
+                .call(xAxis)
+                .selectAll("text")
+                .attr("transform", null)
+                .style("text-anchor", "middle");
+
+            chart.append("g")
+                .attr("class", "axis")
+                .call(yAxis);
+
+            chart.append("text")
+                .attr("class", "axis-label")
+                .attr("x", width / 2)
+                .attr("y", height + 52)
+                .attr("text-anchor", "middle")
+                .text("Date");
+
+            chart.append("text")
+                .attr("class", "axis-label")
+                .attr("transform", "rotate(-90)")
+                .attr("x", -height / 2)
+                .attr("y", -78)
+                .attr("text-anchor", "middle")
+                .text("Weekly Sales");
+
+            const line = d3.line()
+                .x(d => x(d.date))
+                .y(d => y(d.sales))
+                .curve(d3.curveMonotoneX);
+
+            chart.append("path")
+                .datum(data)
+                .attr("class", "sales-line")
+                .attr("d", line);
+
+            const focus = chart.append("g")
+                .attr("class", "focus")
+                .style("display", "none");
+
+            focus.append("circle")
+                .attr("r", 5);
+
+            focus.append("line")
+                .attr("class", "focus-line")
+                .attr("y1", 0)
+                .attr("y2", height);
+
+            const bisectDate = d3.bisector(d => d.date).left;
+
+            chart.append("rect")
+                .attr("class", "overlay")
+                .attr("width", width)
+                .attr("height", height)
+                .on("mouseenter", () => focus.style("display", null))
+                .on("mouseleave", () => {
+                    focus.style("display", "none");
+                    tooltip.style("opacity", 0).attr("aria-hidden", "true");
+                })
+                .on("mousemove", event => {
+                    const pointerX = d3.pointer(event)[0];
+                    const hoveredDate = x.invert(pointerX);
+                    const index = bisectDate(data, hoveredDate, 1);
+                    const previous = data[index - 1];
+                    const next = data[index];
+                    const d = next && hoveredDate - previous.date > next.date - hoveredDate ? next : previous;
+
+                    focus.attr("transform", `translate(${x(d.date)},${y(d.sales)})`);
+                    focus.select(".focus-line")
+                        .attr("transform", `translate(0,${-y(d.sales)})`);
+
+                    tooltip
+                        .style("opacity", 1)
+                        .attr("aria-hidden", "false")
+                        .html(`<strong>${formatDate(d.date)}</strong><br>Sales: ${formatSales(d.sales)}`)
+                        .style("left", `${event.pageX + 14}px`)
+                        .style("top", `${event.pageY - 28}px`);
+                });
+        }
+
+        function drawStoreSalesChart(rawData) {
+            d3.select("#store-chart").selectAll("*").remove();
+
+            const barMargin = { top: 30, right: 80, bottom: 60, left: 90 };
+            const barWidth = 960 - barMargin.left - barMargin.right;
+            const barHeight = 860 - barMargin.top - barMargin.bottom;
+
+            const svg = d3.select("#store-chart")
+                .append("svg")
+                .attr("viewBox", `0 0 ${barWidth + barMargin.left + barMargin.right} ${barHeight + barMargin.top + barMargin.bottom}`)
+                .attr("role", "img")
+                .attr("aria-labelledby", "store-chart-title store-chart-desc");
+
+            svg.append("title")
+                .attr("id", "store-chart-title")
+                .text("Total sales by store horizontal bar chart");
+
+            svg.append("desc")
+                .attr("id", "store-chart-desc")
+                .text("A D3 horizontal bar chart with store number on the y-axis and total weekly sales on the x-axis. The top-performing store is highlighted.");
+
+            const chart = svg.append("g")
+                .attr("transform", `translate(${barMargin.left},${barMargin.top})`);
+
+            const data = Array.from(
+                d3.rollup(
+                    rawData.filter(d => d.Store && !Number.isNaN(+d.Weekly_Sales)),
+                    values => d3.sum(values, d => +d.Weekly_Sales),
+                    d => +d.Store
+                ),
+                ([store, sales]) => ({ store, sales })
+            ).sort((a, b) => d3.descending(a.sales, b.sales));
+
+            const topStore = data[0];
+
+            const x = d3.scaleLinear()
+                .domain([0, d3.max(data, d => d.sales)])
+                .nice()
+                .range([0, barWidth]);
+
+            const y = d3.scaleBand()
+                .domain(data.map(d => d.store))
+                .range([0, barHeight])
+                .padding(0.35);
+
+            const xAxis = d3.axisBottom(x)
+                .ticks(8)
+                .tickFormat(formatMillionSales);
+
+            const yAxis = d3.axisLeft(y)
+                .tickFormat(d => `Store ${d}`);
+
+            chart.append("g")
+                .attr("class", "axis")
+                .attr("transform", `translate(0,${barHeight})`)
+                .call(xAxis);
+
+            chart.append("g")
+                .attr("class", "axis")
+                .call(yAxis);
+
+            chart.append("text")
+                .attr("class", "axis-label")
+                .attr("x", barWidth / 2)
+                .attr("y", barHeight + 48)
+                .attr("text-anchor", "middle")
+                .text("Total Weekly Sales");
+
+            chart.append("text")
+                .attr("class", "axis-label")
+                .attr("transform", "rotate(-90)")
+                .attr("x", -barHeight / 2)
+                .attr("y", -72)
+                .attr("text-anchor", "middle")
+                .text("Store");
+
+            chart.selectAll(".store-bar")
+                .data(data)
+                .join("rect")
+                .attr("class", d => d.store === topStore.store ? "store-bar top-store" : "store-bar")
+                .attr("x", 0)
+                .attr("y", d => y(d.store))
+                .attr("width", d => x(d.sales))
+                .attr("height", y.bandwidth())
+                .on("mouseenter", function (event, d) {
+                    d3.select(this).classed("is-hovered", true);
+
+                    tooltip
+                        .style("opacity", 1)
+                        .attr("aria-hidden", "false")
+                        .html(`<strong>Store ${d.store}</strong><br>Total Sales: ${formatSales(d.sales)}${d.store === topStore.store ? "<br>Top-performing store" : ""}`)
+                        .style("left", `${event.pageX + 14}px`)
+                        .style("top", `${event.pageY - 28}px`);
+                })
+                .on("mousemove", event => {
+                    tooltip
+                        .style("left", `${event.pageX + 14}px`)
+                        .style("top", `${event.pageY - 28}px`);
+                })
+                .on("mouseleave", function () {
+                    d3.select(this).classed("is-hovered", false);
+                    tooltip.style("opacity", 0).attr("aria-hidden", "true");
+                });
+
+            chart.selectAll(".bar-value")
+                .data(data)
+                .join("text")
+                .attr("class", "bar-value")
+                .attr("x", d => x(d.sales) + 6)
+                .attr("y", d => y(d.store) + y.bandwidth() / 2)
+                .attr("dy", "0.35em")
+                .text(d => formatMillionSales(d.sales));
+        }
+
+        function drawHolidaySalesChart(rawData) {
+            d3.select("#holiday-chart").selectAll("*").remove();
+
+            const donutWidth = 960;
+            const donutHeight = 460;
+            const radius = Math.min(donutWidth, donutHeight) / 2 - 50;
+
+            const svg = d3.select("#holiday-chart")
+                .append("svg")
+                .attr("viewBox", `0 0 ${donutWidth} ${donutHeight}`)
+                .attr("role", "img")
+                .attr("aria-labelledby", "holiday-chart-title holiday-chart-desc");
+
+            svg.append("title")
+                .attr("id", "holiday-chart-title")
+                .text("Holiday and non-holiday sales donut chart");
+
+            svg.append("desc")
+                .attr("id", "holiday-chart-desc")
+                .text("A D3 donut chart comparing total sales percentages for holiday weeks and non-holiday weeks.");
+
+            const data = Array.from(
+                d3.rollup(
+                    rawData.filter(d => d.Holiday_Flag !== undefined && !Number.isNaN(+d.Weekly_Sales)),
+                    values => d3.sum(values, d => +d.Weekly_Sales),
+                    d => getWeekType(d)
+                ),
+                ([type, sales]) => ({ type, sales })
+            ).sort((a, b) => d3.ascending(a.type, b.type));
+
+            const totalSales = d3.sum(data, d => d.sales);
+            const color = d3.scaleOrdinal()
+                .domain(["Holiday Week", "Non-Holiday Week"])
+                .range(["#f59e0b", "#2563eb"]);
+
+            const pie = d3.pie()
+                .value(d => d.sales)
+                .sort(null);
+
+            const arc = d3.arc()
+                .innerRadius(radius * 0.58)
+                .outerRadius(radius);
+
+            const labelArc = d3.arc()
+                .innerRadius(radius * 0.78)
+                .outerRadius(radius * 0.78);
+
+            const chart = svg.append("g")
+                .attr("transform", `translate(${donutWidth * 0.36},${donutHeight / 2})`);
+
+            chart.selectAll(".donut-slice")
+                .data(pie(data))
+                .join("path")
+                .attr("class", "donut-slice")
+                .attr("d", arc)
+                .attr("fill", d => color(d.data.type))
+                .on("mouseenter", function (event, d) {
+                    d3.select(this).classed("is-hovered", true);
+
+                    tooltip
+                        .style("opacity", 1)
+                        .attr("aria-hidden", "false")
+                        .html(`<strong>${d.data.type}</strong><br>Total Sales: ${formatSales(d.data.sales)}<br>Percentage: ${formatPercent(d.data.sales / totalSales)}`)
+                        .style("left", `${event.pageX + 14}px`)
+                        .style("top", `${event.pageY - 28}px`);
+                })
+                .on("mousemove", event => {
+                    tooltip
+                        .style("left", `${event.pageX + 14}px`)
+                        .style("top", `${event.pageY - 28}px`);
+                })
+                .on("mouseleave", function () {
+                    d3.select(this).classed("is-hovered", false);
+                    tooltip.style("opacity", 0).attr("aria-hidden", "true");
+                });
+
+            chart.selectAll(".donut-label")
+                .data(pie(data))
+                .join("text")
+                .attr("class", "donut-label")
+                .attr("transform", d => `translate(${labelArc.centroid(d)})`)
+                .attr("text-anchor", "middle")
+                .attr("dy", "0.35em")
+                .text(d => formatPercent(d.data.sales / totalSales));
+
+            chart.append("text")
+                .attr("class", "donut-center-value")
+                .attr("text-anchor", "middle")
+                .attr("dy", "-0.2em")
+                .text(formatBillionSales(totalSales));
+
+            chart.append("text")
+                .attr("class", "donut-center-label")
+                .attr("text-anchor", "middle")
+                .attr("dy", "1.25em")
+                .text("Total Sales");
+
+            const legend = svg.append("g")
+                .attr("class", "legend")
+                .attr("transform", `translate(${donutWidth * 0.68},${donutHeight / 2 - 44})`);
+
+            const legendItems = legend.selectAll(".legend-item")
+                .data(data)
+                .join("g")
+                .attr("class", "legend-item")
+                .attr("transform", (d, i) => `translate(0,${i * 44})`);
+
+            legendItems.append("rect")
+                .attr("width", 18)
+                .attr("height", 18)
+                .attr("rx", 3)
+                .attr("fill", d => color(d.type));
+
+            legendItems.append("text")
+                .attr("x", 30)
+                .attr("y", 9)
+                .attr("dy", "0.35em")
+                .text(d => `${d.type} (${formatPercent(d.sales / totalSales)})`);
+        }
+
+        function drawFuelSalesScatterPlot(rawData) {
+            d3.select("#scatter-chart").selectAll("*").remove();
+
+            const scatterMargin = { top: 30, right: 40, bottom: 70, left: 90 };
+            const scatterWidth = 960 - scatterMargin.left - scatterMargin.right;
+            const scatterHeight = 520 - scatterMargin.top - scatterMargin.bottom;
+
+            const svg = d3.select("#scatter-chart")
+                .append("svg")
+                .attr("viewBox", `0 0 ${scatterWidth + scatterMargin.left + scatterMargin.right} ${scatterHeight + scatterMargin.top + scatterMargin.bottom}`)
+                .attr("role", "img")
+                .attr("aria-labelledby", "scatter-chart-title scatter-chart-desc");
+
+            svg.append("title")
+                .attr("id", "scatter-chart-title")
+                .text("Fuel price versus weekly sales scatter plot");
+
+            svg.append("desc")
+                .attr("id", "scatter-chart-desc")
+                .text("A D3 scatter plot with fuel price on the x-axis and weekly sales on the y-axis. Points are colored by holiday and non-holiday weeks.");
+
+            const chart = svg.append("g")
+                .attr("transform", `translate(${scatterMargin.left},${scatterMargin.top})`);
+
+            const data = rawData
+                .map(d => ({
+                    store: d.Store,
+                    fuelPrice: +d.Fuel_Price,
+                    sales: +d.Weekly_Sales,
+                    weekType: getWeekType(d)
+                }))
+                .filter(d => d.store && !Number.isNaN(d.fuelPrice) && !Number.isNaN(d.sales));
+
+            const x = d3.scaleLinear()
+                .domain(d3.extent(data, d => d.fuelPrice))
+                .nice()
+                .range([0, scatterWidth]);
+
+            const y = d3.scaleLinear()
+                .domain([0, d3.max(data, d => d.sales)])
+                .nice()
+                .range([scatterHeight, 0]);
+
+            const color = d3.scaleOrdinal()
+                .domain(["Holiday Week", "Non-Holiday Week"])
+                .range(["#f59e0b", "#2563eb"]);
+
+            const xAxis = d3.axisBottom(x)
+                .ticks(8)
+                .tickFormat(d => `$${d3.format(".2f")(d)}`);
+
+            const yAxis = d3.axisLeft(y)
+                .ticks(8)
+                .tickFormat(formatMillionSales);
+
+            chart.append("g")
+                .attr("class", "axis")
+                .attr("transform", `translate(0,${scatterHeight})`)
+                .call(xAxis);
+
+            chart.append("g")
+                .attr("class", "axis")
+                .call(yAxis);
+
+            chart.append("text")
+                .attr("class", "axis-label")
+                .attr("x", scatterWidth / 2)
+                .attr("y", scatterHeight + 52)
+                .attr("text-anchor", "middle")
+                .text("Fuel Price");
+
+            chart.append("text")
+                .attr("class", "axis-label")
+                .attr("transform", "rotate(-90)")
+                .attr("x", -scatterHeight / 2)
+                .attr("y", -78)
+                .attr("text-anchor", "middle")
+                .text("Weekly Sales");
+
+            chart.selectAll(".scatter-dot")
+                .data(data)
+                .join("circle")
+                .attr("class", "scatter-dot")
+                .attr("cx", d => x(d.fuelPrice))
+                .attr("cy", d => y(d.sales))
+                .attr("r", 4)
+                .attr("fill", d => color(d.weekType))
+                .on("mouseenter", function (event, d) {
+                    d3.select(this).classed("is-hovered", true);
+
+                    tooltip
+                        .style("opacity", 1)
+                        .attr("aria-hidden", "false")
+                        .html(`<strong>Store ${d.store}</strong><br>Fuel Price: $${d3.format(".3f")(d.fuelPrice)}<br>Weekly Sales: ${formatSales(d.sales)}<br>${d.weekType}`)
+                        .style("left", `${event.pageX + 14}px`)
+                        .style("top", `${event.pageY - 28}px`);
+                })
+                .on("mousemove", event => {
+                    tooltip
+                        .style("left", `${event.pageX + 14}px`)
+                        .style("top", `${event.pageY - 28}px`);
+                })
+                .on("mouseleave", function () {
+                    d3.select(this).classed("is-hovered", false);
+                    tooltip.style("opacity", 0).attr("aria-hidden", "true");
+                });
+
+            const legend = chart.append("g")
+                .attr("class", "legend")
+                .attr("transform", `translate(${scatterWidth - 170},20)`);
+
+            const legendItems = legend.selectAll(".legend-item")
+                .data(color.domain())
+                .join("g")
+                .attr("class", "legend-item")
+                .attr("transform", (d, i) => `translate(0,${i * 28})`);
+
+            legendItems.append("circle")
+                .attr("cx", 9)
+                .attr("cy", 9)
+                .attr("r", 7)
+                .attr("fill", d => color(d));
+
+            legendItems.append("text")
+                .attr("x", 24)
+                .attr("y", 9)
+                .attr("dy", "0.35em")
+                .text(d => d);
+        }
+
+        function showLoadError() {
+            d3.select("#chart").selectAll("*").remove();
+            d3.select("#chart")
+                .append("p")
+                .attr("class", "error")
+                .text("Unable to load sales-data.js. Make sure sales-data.js is in the same folder as index.html.");
+            d3.select("#store-chart").selectAll("*").remove();
+            d3.select("#holiday-chart").selectAll("*").remove();
+            d3.select("#scatter-chart").selectAll("*").remove();
+        }
+
+        if (window.walmartSalesData) {
+            setupFilters(window.walmartSalesData);
+            updateDashboard(window.walmartSalesData);
+        } else {
+            showLoadError();
+        }
+    </script>
+</body>
+
+</html>
